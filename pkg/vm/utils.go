@@ -55,21 +55,19 @@ type NodeInfo struct {
 	VmMode             onboard.VMMode
 }
 
-var LsmOrder = "bpf,apparmor,selinux"
+var LsmOrder = []string{"bpf", "apparmor", "selinux"}
 
 func GetEnforcer() (string, string, error) {
-	order := strings.Split(LsmOrder, ",")
 	// Detecting enforcer
-	nodeEnforcer := DetectEnforcer(order)
-	if (nodeEnforcer == "apparmor") && (CheckIfApparmorFsPresent() == "no") {
+	nodeEnforcer := DetectEnforcer(LsmOrder)
+	if (nodeEnforcer == "apparmor") && !CheckIfApparmorFsPresent() {
 		nodeEnforcer = "NA"
 	}
 	if nodeEnforcer == "NA" {
 		logger.Info1("Node doesn't supports any KubeArmor Supported Lsm, Enforcement is disabled")
 		nodeEnforcer = "none"
 	}
-	btfPresent := CheckBtfSupport()
-	return nodeEnforcer, btfPresent, nil
+	return nodeEnforcer, CheckBtfSupport(), nil
 }
 
 // DetectEnforcer detect the enforcer on the node
@@ -152,12 +150,12 @@ func CheckBtfSupport() string {
 	}
 	return "no"
 }
-func CheckIfApparmorFsPresent() string {
+func CheckIfApparmorFsPresent() bool {
 	path := "/etc/apparmor.d/tunables"
 	if _, err := os.Stat(filepath.Clean(path)); err == nil {
-		return "yes"
+		return true
 	}
-	return "no"
+	return false
 }
 
 // GetAvailableLsms Function
@@ -203,7 +201,7 @@ func kubeArmorCompatibility() *NodeInfo {
 	if err != nil {
 		logger.Error("Error getting kernel version:", err)
 	}
-	if enforcer == "" {
+	if enforcer == "none" {
 		nodeInfo.KubearmorSupported = false
 	} else {
 		nodeInfo.KubearmorSupported = true
