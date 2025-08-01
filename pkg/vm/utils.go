@@ -4,20 +4,25 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/accuknox/accuknox-cli-v2/pkg/deboard"
 	"github.com/accuknox/accuknox-cli-v2/pkg/logger"
 	"github.com/accuknox/accuknox-cli-v2/pkg/onboard"
 	"github.com/fatih/color"
+	"github.com/go-ping/ping"
 	"github.com/olekukonko/tablewriter"
 	"github.com/shirou/gopsutil/host"
-	"github.com/shirou/gopsutil/net"
+	gops "github.com/shirou/gopsutil/net"
 	"github.com/shirou/gopsutil/process"
 
 	"k8s.io/kubectl/pkg/util/slice"
@@ -244,14 +249,14 @@ func checkPorts() (map[string]string, error) {
 				isBlocked = false
 			}
 
-			// Determine final status string, prioritizing the block
+			// If blocked no need to check if in use or not
 			if isBlocked {
-				finalStatus[mapKey] = "BLOCKED by firewall"
-				continue // If it's blocked, we don't need to check if it's in use
+				finalStatus[mapKey] = red("BLOCKED by firewall")
+				continue
 			}
 		}
 
-		// 3. If allowed, check if it's in use
+		// If allowed, check in use or not
 		if usage, inUse := listeningPorts[port.portNo]; inUse {
 			processInfo := fmt.Sprintf("PID: %d", usage.PID)
 			if usage.ProcessName != "" {
@@ -259,7 +264,7 @@ func checkPorts() (map[string]string, error) {
 			}
 			finalStatus[mapKey] = fmt.Sprintf("In use by %s", processInfo)
 		} else {
-			finalStatus[mapKey] = "ALLOWED (Available)"
+			finalStatus[mapKey] = green("ALLOWED (Available)")
 		}
 	}
 
@@ -269,7 +274,7 @@ func printMapAsTable(heading []string, data map[string]string) {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader(heading)
 	table.SetBorder(true)
-	table.SetRowLine(false) // Add line between rows
+	table.SetRowLine(false)
 	table.SetAlignment(tablewriter.ALIGN_LEFT)
 	table.SetAutoWrapText(false)
 	for key, value := range data {
@@ -279,7 +284,6 @@ func printMapAsTable(heading []string, data map[string]string) {
 }
 
 func getInstalledAgents() (map[string]string, onboard.VMMode, onboard.NodeType) {
-	// get install Agents- docker, systemd, etc.
 	mp := make(map[string]string)
 	installedAgents, err := onboard.CheckInstalledSystemdServices()
 	if err != nil {
@@ -392,7 +396,7 @@ func getFirewallStatus() (*FirewallStatus, error) {
 }
 func getListeningPorts() (map[string]PortUsageInfo, error) {
 	listeningPorts := make(map[string]PortUsageInfo)
-	conns, err := net.Connections("tcp")
+	conns, err := gops.Connections("tcp")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get TCP connections: %v", err)
 	}
@@ -419,6 +423,100 @@ func getListeningPorts() (map[string]PortUsageInfo, error) {
 	}
 	return listeningPorts, nil
 }
+func checkSAASconnectivity(o *Options) map[string]string {
+	domains := []string{
+		o.SpireReadyURL,
+		o.SpireMetricsURL,
+		o.PPSURL,
+		o.KnoxGwURL,
+	}
+	statuses := checkDomainStatuses(domains)
+	return statuses
+}
+func checkDomainStatuses(rawURLs []string) map[string]string {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	results := make(map[string]string)
+	timeout := 5 * time.Second
+
+	for _, raw := range rawURLs {
+		wg.Add(1)
+
+		go func(raw string) {
+			defer wg.Done()
+
+			parsed, err := url.Parse(raw)
+			if err != nil {
+				mu.Lock()
+				results[raw] = red("Failed")
+				mu.Unlock()
+				return
+			}
+
+			host := parsed.Host
+			if !strings.Contains(host, ":") {
+				switch parsed.Scheme {
+				case "https":
+					host = net.JoinHostPort(parsed.Host, "443")
+				case "http":
+					host = net.JoinHostPort(parsed.Host, "80")
+				default:
+					host = net.JoinHostPort(parsed.Host, "80") // Fallback to 80
+				}
+			}
+			conn, err := net.DialTimeout("tcp", host, timeout)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				results[host] = red("Failed")
+			} else {
+				err = conn.Close()
+				if err != nil {
+					logger.Error("error closing connection")
+				}
+				results[host] = green("Passed")
+			}
+		}(raw)
+	}
+	wg.Wait()
+	return results
+}
+func checkNodeconnectivity(o *Options) (map[string]string, error) {
+
+	return pingAddress(o.CPNodeAddr)
+}
+func pingAddress(nodeAddr string) (map[string]string, error) {
+	var mp = make(map[string]string)
+
+	//failed by default
+	mp[nodeAddr] = red("Failed")
+
+	pinger, err := ping.NewPinger(nodeAddr)
+	if err != nil {
+		return mp, err
+	}
+	pinger.Count = 4 // packet count
+	pinger.Interval = time.Second
+	pinger.Timeout = 5 * time.Second
+	pinger.SetPrivileged(true) // privilege
+
+	var stats *ping.Statistics
+	pinger.OnFinish = func(s *ping.Statistics) {
+		stats = s
+	}
+	err = pinger.Run()
+	if err != nil {
+		return mp, err
+	}
+	// Check if there was any packet loss. If not, return "successful".
+	if stats != nil && stats.PacketLoss == 0 {
+		mp[nodeAddr] = green("Passed")
+		return mp, nil
+	}
+	// packet loss = connection failure.
+	return mp, nil
+}
 func printNodeData(nodeData NodeInfo) {
 
 	var data [][]string
@@ -443,14 +541,10 @@ func printNodeData(nodeData NodeInfo) {
 	renderOutputInTableWithNoBorders(data)
 
 }
-func printPortData(portData map[string]string) {
-	fmt.Println("\n" + boldWhite("Port Availability"))
-	printMapAsTable([]string{"Ports Availability", "Status"}, portData)
 
-}
-func printAgentsData(data map[string]string) {
-	fmt.Println("\n" + boldWhite("Accuknox Agents"))
-	printMapAsTable([]string{"Agent", "Status"}, data)
+func printData(data map[string]string, heading1, heading2, title string) {
+	fmt.Println("\n" + boldWhite(title))
+	printMapAsTable([]string{heading1, heading2}, data)
 
 }
 func renderOutputInTableWithNoBorders(data [][]string) {

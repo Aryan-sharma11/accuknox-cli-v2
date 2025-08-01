@@ -7,7 +7,15 @@ import (
 	"github.com/accuknox/accuknox-cli-v2/pkg/onboard"
 )
 
-func InspectVM() error {
+type Options struct {
+	SpireReadyURL   string
+	SpireMetricsURL string
+	PPSURL          string
+	KnoxGwURL       string
+	CPNodeAddr      string
+}
+
+func InspectVM(o *Options) error {
 
 	var (
 		kaCompatible      *NodeInfo
@@ -51,9 +59,23 @@ func InspectVM() error {
 	}
 
 	printNodeData(*kaCompatible)
-	printPortData(portsAvailability)
+	printData(portsAvailability, "PORTS", "STATUS", "Ports Availability")
 	if len(installedAgents) > 0 {
-		printAgentsData(installedAgents)
+		printData(installedAgents, "AGENTS", "STATUS", "Accuknox Agents")
+	} else {
+		// if there are no agents installed , check connectivity.
+		if o.CPNodeAddr == "" {
+			// treat it as control plane node
+			output := checkSAASconnectivity(o)
+			printData(output, "URL", "STATUS", "Accuknox Connectivity")
+		} else {
+			// it's a worker-node and check connectivity to contol plane node'
+			output, err := checkNodeconnectivity(o)
+			if err != nil {
+				logger.Error("Error checking controlplane connectivity", err.Error())
+			}
+			printData(output, "Node Address", "STATUS", "Control Plane Connectivity")
+		}
 	}
 
 	return nil

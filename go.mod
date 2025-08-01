@@ -41,6 +41,7 @@ require (
 	github.com/docker/docker v28.1.1+incompatible
 	github.com/fatih/color v1.18.0
 	github.com/gdamore/tcell/v2 v2.6.0
+	github.com/go-ping/ping v1.2.0
 	github.com/golang-jwt/jwt v3.2.2+incompatible
 	github.com/google/go-github v17.0.0+incompatible
 	github.com/itchyny/gojq v0.12.17
